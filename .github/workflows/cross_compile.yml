@@ -27,4 +27,4 @@ jobs:
         with:
           use-cross: true
           command: build
-          args: --target=${{ matrix.target }} --no-default-features --features json,default-json,cbor
+          args: --target=${{ matrix.target }} --no-default-features --features json,default-json,cbor,msgpack
