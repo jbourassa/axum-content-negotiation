@@ -12,7 +12,7 @@ use axum::{
     body::Bytes,
     extract::{FromRequest, Request},
     http::{
-        header::{HeaderValue, ACCEPT, CONTENT_TYPE},
+        header::{HeaderValue, ACCEPT, CONTENT_LENGTH, CONTENT_TYPE},
         StatusCode,
     },
     response::{IntoResponse, Response},
@@ -348,6 +348,7 @@ where
             parts
                 .headers
                 .insert(CONTENT_TYPE, HeaderValue::from_static(encoding));
+            parts.headers.remove(CONTENT_LENGTH);
 
             Ok(Response::from_parts(parts, body.into()))
         })
@@ -361,7 +362,7 @@ mod test {
     use axum::{
         body::Body,
         http::{
-            header::{ACCEPT, CONTENT_TYPE},
+            header::{ACCEPT, CONTENT_LENGTH, CONTENT_TYPE},
             Request, StatusCode,
         },
         response::IntoResponse,
@@ -376,6 +377,13 @@ mod test {
     #[derive(Debug, serde::Serialize, serde::Deserialize)]
     struct Example {
         message: String,
+    }
+
+    fn content_length(headers: &axum::http::HeaderMap) -> usize {
+        headers
+            .get(CONTENT_LENGTH)
+            .map(|v| v.to_str().unwrap().parse::<usize>().unwrap())
+            .unwrap()
     }
 
     mod general {
@@ -603,14 +611,17 @@ mod test {
                     .await
                     .unwrap();
 
+                let expected_body = json!({ "message": "Hello, test!" }).to_string();
+
                 assert_eq!(response.status(), 200);
                 assert_eq!(
                     response.headers().get(CONTENT_TYPE).unwrap(),
                     "application/json"
                 );
+                assert_eq!(content_length(response.headers()), expected_body.len());
                 assert_eq!(
                     response.into_body().collect().await.unwrap().to_bytes(),
-                    json!({ "message": "Hello, test!" }).to_string()
+                    expected_body,
                 );
             }
 
@@ -804,12 +815,7 @@ mod test {
                     .await
                     .unwrap();
 
-                assert_eq!(response.status(), 200);
-                assert_eq!(
-                    response.headers().get(CONTENT_TYPE).unwrap(),
-                    "application/cbor"
-                );
-                assert_eq!(response.into_body().collect().await.unwrap().to_bytes(), {
+                let expected_body = {
                     let mut writer = BufWriter::new(Vec::new());
                     Value::Map(vec![(
                         Value::Text("message".to_string()),
@@ -818,7 +824,18 @@ mod test {
                     .encode(&mut writer)
                     .unwrap();
                     writer.into_inner()
-                });
+                };
+
+                assert_eq!(response.status(), 200);
+                assert_eq!(
+                    response.headers().get(CONTENT_TYPE).unwrap(),
+                    "application/cbor"
+                );
+                assert_eq!(content_length(response.headers()), expected_body.len());
+                assert_eq!(
+                    response.into_body().collect().await.unwrap().to_bytes(),
+                    expected_body,
+                );
             }
 
             #[tokio::test]
@@ -1030,15 +1047,21 @@ mod test {
                     .await
                     .unwrap();
 
+                let expected_body = {
+                    let body = HashMap::from([("message", "Hello, test!")]);
+                    rmp_serde::encode::to_vec_named(&body).unwrap()
+                };
+
                 assert_eq!(response.status(), 200);
                 assert_eq!(
                     response.headers().get(CONTENT_TYPE).unwrap(),
                     "application/msgpack"
                 );
-                assert_eq!(response.into_body().collect().await.unwrap().to_bytes(), {
-                    let body = HashMap::from([("message", "Hello, test!")]);
-                    rmp_serde::encode::to_vec_named(&body).unwrap()
-                });
+                assert_eq!(content_length(response.headers()), expected_body.len());
+                assert_eq!(
+                    response.into_body().collect().await.unwrap().to_bytes(),
+                    expected_body
+                );
             }
 
             #[tokio::test]
