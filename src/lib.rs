@@ -9,14 +9,14 @@ use std::{
 
 use axum::{
     async_trait,
-    body::Bytes,
-    extract::{FromRequest, Request},
+    body::{Bytes, HttpBody},
+    extract::FromRequest,
     http::{
         header::{HeaderValue, ACCEPT, CONTENT_LENGTH, CONTENT_TYPE},
-        StatusCode,
+        Request, StatusCode,
     },
     response::{IntoResponse, Response},
-    Extension,
+    BoxError, Extension,
 };
 use tower::Service;
 
@@ -77,14 +77,17 @@ pub struct Negotiate<T>(
 /// It will attempt to deserialize the request body based on the `Content-Type` header.
 /// If the `Content-Type` header is not supported, it will return a 415 Unsupported Media Type response without running the handler.
 #[async_trait]
-impl<T, S> FromRequest<S> for Negotiate<T>
+impl<T, S, B> FromRequest<S, B> for Negotiate<T>
 where
     T: serde::de::DeserializeOwned,
     S: Send + Sync,
+    B: HttpBody + Send + 'static,
+    B::Data: Send,
+    B::Error: Into<BoxError>,
 {
     type Rejection = Response;
 
-    async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
+    async fn from_request(req: Request<B>, state: &S) -> Result<Self, Self::Rejection> {
         let accept = req
             .headers()
             .get(CONTENT_TYPE)
@@ -238,11 +241,14 @@ impl AcceptExt for axum::http::HeaderMap {
 #[derive(Clone)]
 pub struct NegotiateService<S>(S);
 
-impl<T> Service<Request> for NegotiateService<T>
+impl<T, B> Service<Request<B>> for NegotiateService<T>
 where
-    T: Service<Request>,
+    T: Service<Request<B>>,
     T::Response: IntoResponse,
     T::Future: Send + 'static,
+    B: HttpBody + Send + 'static,
+    B::Data: Send,
+    B::Error: Into<BoxError>,
 {
     type Response = axum::response::Response;
     type Error = T::Error;
@@ -253,7 +259,7 @@ where
         self.0.poll_ready(cx)
     }
 
-    fn call(&mut self, request: Request) -> Self::Future {
+    fn call(&mut self, request: Request<B>) -> Self::Future {
         let accept = request.headers().negotiate();
 
         let Some(encoding) = accept else {
@@ -350,7 +356,9 @@ where
                 .insert(CONTENT_TYPE, HeaderValue::from_static(encoding));
             parts.headers.remove(CONTENT_LENGTH);
 
-            Ok(Response::from_parts(parts, body.into()))
+            let body = http_body::Full::new(body.into());
+            let body = axum::body::boxed(body);
+            Ok(axum::http::Response::from_parts(parts, body))
         })
     }
 }
@@ -358,6 +366,7 @@ where
 #[cfg(test)]
 mod test {
     use crate::Negotiate;
+    use axum::body::HttpBody;
 
     use axum::{
         body::Body,
@@ -369,7 +378,6 @@ mod test {
         routing::post,
         Router,
     };
-    use http_body_util::BodyExt;
     use tower::ServiceExt;
 
     use crate::NegotiateLayer;
@@ -442,7 +450,7 @@ mod test {
                         Request::builder()
                             .uri("/")
                             .method("POST")
-                            .body(Body::empty())
+                            .body(http_body::Empty::<&[u8]>::new())
                             .unwrap(),
                     )
                     .await
@@ -472,7 +480,7 @@ mod test {
                             .uri("/")
                             .header(ACCEPT, "non-supported")
                             .method("POST")
-                            .body(Body::empty())
+                            .body(http_body::Empty::<&[u8]>::new())
                             .unwrap(),
                     )
                     .await
